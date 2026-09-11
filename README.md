@@ -1,4 +1,4 @@
-# tbreminder
+# tbreminder -almost discontinued
 
 JSONスケジュールに基づき、Toast通知とタスクバー次回予定表示を行うWindhawkモジュール。
 スリープ復帰時の後追い発火やアイコン混雑時の自動調整など、日常使いに合わせた実装。
