@@ -199,10 +199,13 @@ static std::wstring GetStrSetting(LPCWSTR key, LPCWSTR def) {
     return r;
 }
 static int GetIntSetting(LPCWSTR key, int def) {
+    // Wh_GetIntSetting returns 0 both for "absent" and for a genuine 0/false.
+    // All int settings ship YAML defaults, and LoadSettings clamps ranges, so
+    // do NOT substitute the default on 0: doing so would silently force every
+    // explicitly-set 0/false (preNotifyMin, catchupWindowMin, tooltipCount,
+    // taskbarShowNext=false, ...) back to its default.
     int v = Wh_GetIntSetting(key);
-    // Absent/invalid settings read as 0: fall back to the default so keys with
-    // non-zero defaults behave correctly even before YAML defaults are available.
-    if (v == 0) v = def;
+    (void)def;
     return v;
 }
 
@@ -571,19 +574,51 @@ static std::vector<Entry> ParseScheduleText(const std::wstring& raw, std::vector
 static __int64 ToMinKey(int y,int mo,int d,int h,int mi) {
     return ((((__int64)y*12+mo)*31+d)*24+h)*60+mi;
 }
+// Real-calendar helper: the fixed 31-day encoding of ToMinKey cannot express
+// "the day shifted by ±N" with plain ±1440 arithmetic (a 30-day month maps to
+// a gap, breaking 'yesterday'/'tomorrow' on the 1st of the next month). Shift
+// the wall-clock date by dayOffset real calendar days, then combine with the
+// given hour/minute. DST-safe: only year/month/day are used.
+static int DaysInMonth(int y, int m) {
+    static const int kDim[] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+    if (m == 2) {
+        bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+        return leap ? 29 : 28;
+    }
+    return (m >= 1 && m <= 12) ? kDim[m - 1] : 30;
+}
+static __int64 KeyOnShiftedDay(const SYSTEMTIME& base, int dayOffset, int hour, int minute) {
+    int y = base.wYear, m = base.wMonth, d = base.wDay;
+    if (dayOffset > 0) {
+        while (dayOffset > 0) {
+            d++;
+            if (d > DaysInMonth(y, m)) { d = 1; m++; if (m > 12) { m = 1; y++; } }
+            dayOffset--;
+        }
+    } else {
+        while (dayOffset < 0) {
+            d--;
+            if (d < 1) { m--; if (m < 1) { m = 12; y--; } d = DaysInMonth(y, m); }
+            dayOffset++;
+        }
+    }
+    return ToMinKey(y, m, d, hour, minute);
+}
 static __int64 NextFireKey(const Entry& e, const SYSTEMTIME& now) {
     if (e.kind == TimeKind::Daily) {
         __int64 today = ToMinKey(now.wYear,now.wMonth,now.wDay,e.hour,e.minute);
         __int64 cur = ToMinKey(now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute);
-        if (today < cur) {
-            // tomorrow (approx: +1 day, ignore month overflow for sort purposes by adding 24*60)
-            return today + 24*60;
-        }
+        if (today < cur)
+            return KeyOnShiftedDay(now, 1, e.hour, e.minute); // tomorrow (real calendar)
         return today;
     } else if (e.kind == TimeKind::Hourly) {
         __int64 thisH = ToMinKey(now.wYear,now.wMonth,now.wDay,now.wHour,e.minute);
         __int64 cur = ToMinKey(now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute);
-        if (thisH < cur) return thisH + 60;
+        if (thisH < cur) {
+            if (now.wHour == 23)
+                return KeyOnShiftedDay(now, 1, 0, e.minute); // next hour is next day 00:MM
+            return ToMinKey(now.wYear, now.wMonth, now.wDay, now.wHour + 1, e.minute);
+        }
         return thisH;
     } else if (e.kind == TimeKind::Once) {
         return ToMinKey(e.year,e.month,e.day,e.hour,e.minute);
@@ -1257,11 +1292,14 @@ static void CheckDue(bool startup) {
         long long onceK = LLONG_MIN;
         if (e.kind == TimeKind::Daily) {
             long long cand = ToMinKey(now.wYear,now.wMonth,now.wDay,e.hour,e.minute);
-            if (cand > curMin) cand -= 1440;
+            if (cand > curMin) cand = KeyOnShiftedDay(now, -1, e.hour, e.minute); // yesterday (real calendar)
             fire = cand; haveFire = true;
         } else if (e.kind == TimeKind::Hourly) {
             long long cand = ToMinKey(now.wYear,now.wMonth,now.wDay,now.wHour,e.minute);
-            if (cand > curMin) cand -= 60;
+            if (cand > curMin) {
+                if (now.wHour == 0) cand = KeyOnShiftedDay(now, -1, 23, e.minute); // previous hour = yesterday 23:MM
+                else cand = ToMinKey(now.wYear, now.wMonth, now.wDay, now.wHour - 1, e.minute);
+            }
             fire = cand; haveFire = true;
         } else if (e.kind == TimeKind::Once) {
             long long k = ToMinKey(e.year,e.month,e.day,e.hour,e.minute);
@@ -1282,9 +1320,18 @@ static void CheckDue(bool startup) {
             if (e.kind == TimeKind::Once) {
                 upcoming = onceK; haveUpcoming = true;
             } else if (haveFire) {
-                upcoming = fire;
-                if (e.kind == TimeKind::Daily && fire < curMin) upcoming += 1440;
-                else if (e.kind == TimeKind::Hourly && fire < curMin) upcoming += 60;
+                if (e.kind == TimeKind::Daily) {
+                    // Next occurrence: today if not yet passed, else tomorrow (real calendar).
+                    __int64 kToday = ToMinKey(now.wYear,now.wMonth,now.wDay,e.hour,e.minute);
+                    upcoming = (kToday > curMin) ? kToday : KeyOnShiftedDay(now, 1, e.hour, e.minute);
+                } else {
+                    // Hourly: this hour if not yet passed, else next hour (may cross midnight).
+                    __int64 kThisH = ToMinKey(now.wYear,now.wMonth,now.wDay,now.wHour,e.minute);
+                    if (kThisH > curMin) upcoming = kThisH;
+                    else upcoming = (now.wHour == 23)
+                        ? KeyOnShiftedDay(now, 1, 0, e.minute)
+                        : ToMinKey(now.wYear, now.wMonth, now.wDay, now.wHour + 1, e.minute);
+                }
                 haveUpcoming = true;
             }
             if (haveUpcoming) {
