@@ -256,7 +256,7 @@ static void LoadSettings() {
     }
     if (s.scheduleFiles.empty()) {
         s.scheduleFiles.push_back(
-            L"C:\\Users\\kiev\\_app\\fujikeit\\windhawk\\reminder\\reminder.json");
+            L"C:\\C:\Users\user\windhawk\reminder\\reminder.json");
     }
     s.pollIntervalSec = GetIntSetting(L"pollIntervalSec", 30);
     s.toastDurationMs = GetIntSetting(L"toastDurationMs", 5000);
