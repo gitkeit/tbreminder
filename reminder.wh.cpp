@@ -49,7 +49,7 @@
 // ==WindhawkModSettings==
 /*
 - scheduleFiles:
-  - - path: 'C:\Users\kiev\_app\fujikeit\windhawk\reminder\reminder.json'
+  - - path: 'C:\Users\user\windhawk\reminder\reminder.json'
       $name: パス
   $name: スケジュールファイル一覧
   $description: パスの追加・削除が可能。行クリックで該当ファイルを開けます
